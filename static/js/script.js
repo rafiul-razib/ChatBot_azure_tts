@@ -1,3 +1,6 @@
+// ------------------------------------
+// Send message function
+// ------------------------------------
 async function sendMessage() {
   const input = document.getElementById("user-input");
   const message = input.value.trim();
@@ -18,12 +21,20 @@ async function sendMessage() {
 
     // Add bot reply
     addMessage("Lira AI Assistant", data.reply, "bot");
+
+    // Speak bot reply
+    speakBot(data.reply);
   } catch (err) {
     console.error("Error:", err);
-    addMessage("Lira AI Assistant", "Sorry, something went wrong!", "bot");
+    const errorReply = "Sorry, something went wrong!";
+    addMessage("Lira AI Assistant", errorReply, "bot");
+    speakBot(errorReply);
   }
 }
 
+// ------------------------------------
+// Add message to chat box
+// ------------------------------------
 function addMessage(sender, text, type) {
   const chatBox = document.getElementById("chat-box");
 
@@ -54,3 +65,34 @@ function addMessage(sender, text, type) {
     behavior: "smooth"
   });
 }
+
+// ------------------------------------
+// Speak bot reply with female voice
+// ------------------------------------
+function speakBot(text) {
+  if ('speechSynthesis' in window) {
+    const utterance = new SpeechSynthesisUtterance(text);
+
+    // Get voices
+    const voices = window.speechSynthesis.getVoices();
+
+    // Select a female voice (example: Google UK English Female)
+    const femaleVoice = voices.find(v => v.name.includes("Female")) || voices[0];
+    utterance.voice = femaleVoice;
+
+    // Set friendly speech parameters
+    utterance.lang = femaleVoice.lang || "en-US";
+    utterance.rate = 1;    // Normal speed
+    utterance.pitch = 1.2; // Slightly higher pitch for friendly tone
+    utterance.volume = 1;  // Max volume
+
+    window.speechSynthesis.speak(utterance);
+  }
+}
+
+// ------------------------------------
+// Optional: reload voices if not loaded initially
+// ------------------------------------
+window.speechSynthesis.onvoiceschanged = () => {
+  console.log("Available voices:", window.speechSynthesis.getVoices());
+};
