@@ -1,9 +1,9 @@
 // ------------------------------------
-// Timing constants
+// Timing & constants
 // ------------------------------------
-const BOT_REPLY_DELAY = 1200;
-const LISTEN_RESTART_DELAY = 700;
-const USER_SILENCE_TIMEOUT = 7000;
+const BOT_REPLY_DELAY = 100;
+const LISTEN_RESTART_DELAY = 100;
+const USER_SILENCE_TIMEOUT = 2000;
 
 // ------------------------------------
 // Global state
@@ -13,217 +13,316 @@ let isConversationActive = false;
 let isBotSpeaking = false;
 let recognitionReady = true;
 let silenceTimer = null;
-let availableVoices = [];
+let audioUnlocked = false;
+let currentAudio = null;
+let lastUserLang = "en-US";
+let currentAbortController = null;
 
 // ------------------------------------
-// Load voices properly
+// DOM elements
 // ------------------------------------
-function loadVoices() {
-  availableVoices = window.speechSynthesis.getVoices();
+const micBtn = document.getElementById("micBtn");
+const userInput = document.getElementById("user-input");
+const chatBox = document.getElementById("chat-box");
+const typingIndicator = document.getElementById("typingIndicator");
+
+// ------------------------------------
+// Detect Bangla text
+// ------------------------------------
+function isBangla(text) {
+  return /[\u0980-\u09FF]/.test(text);
 }
 
-window.speechSynthesis.onvoiceschanged = loadVoices;
-loadVoices(); // initial attempt
+// ------------------------------------
+// Unlock browser audio (required by Chrome)
+// ------------------------------------
+function unlockAudio() {
+  if (audioUnlocked) return;
+  const a = new Audio();
+  a.play().catch(() => {});
+  audioUnlocked = true;
+}
 
 // ------------------------------------
-// Speech Recognition Setup
+// Typing indicator helpers
+// ------------------------------------
+function showTyping() {
+  if (typingIndicator) typingIndicator.style.display = "flex";
+}
+
+function hideTyping() {
+  if (typingIndicator) typingIndicator.style.display = "none";
+}
+
+// ------------------------------------
+// Initialize SpeechRecognition
 // ------------------------------------
 const SpeechRecognition =
   window.SpeechRecognition || window.webkitSpeechRecognition;
-
-const micBtn = document.getElementById("micBtn");
-const userInput = document.getElementById("user-input");
 
 if (!SpeechRecognition) {
   micBtn.disabled = true;
   micBtn.innerText = "🎤 Not supported";
 } else {
   recognition = new SpeechRecognition();
-  recognition.lang = navigator.language || "en-US";
   recognition.continuous = false;
   recognition.interimResults = false;
 
   recognition.onstart = () => {
     recognitionReady = false;
-     micBtn.classList.add("pulsing"); // Start pulsing
+    micBtn.classList.add("pulsing");
     startSilenceTimer();
   };
 
   recognition.onend = () => {
     recognitionReady = true;
-     micBtn.classList.remove("pulsing"); // Start pulsing
-    clearTimeout(silenceTimer);
-  };
-
-  recognition.onresult = (event) => {
-    if (!isConversationActive || isBotSpeaking) return;
-
+    micBtn.classList.remove("pulsing");
     clearTimeout(silenceTimer);
 
-    const transcript = event.results[0][0].transcript.trim();
-    if (!transcript) return;
-
-    recognition.stop();
-    userInput.value = transcript;
-    sendMessage();
+    if (isConversationActive && !isBotSpeaking) {
+      setTimeout(safeStartRecognition, LISTEN_RESTART_DELAY);
+    }
   };
 
-  recognition.onerror = () => {
-    recognition.stop();
-  };
+  recognition.onerror = () => recognition.stop();
 }
 
 // ------------------------------------
-// Mic button toggle
+// Mic button (toggle conversation)
 // ------------------------------------
 micBtn.onclick = () => {
-  isConversationActive = !isConversationActive;
+  unlockAudio();
 
   if (isConversationActive) {
-    micBtn.innerText = "🎙...";
-     micBtn.classList.add("pulsing"); // Start pulsing
-    safeStartRecognition();
+    isConversationActive = false;
+    stopAll();
+    micBtn.classList.remove("pulsing");
   } else {
-    micBtn.innerText = "🛑";
-     micBtn.classList.remove("pulsing"); // Start pulsing
-    recognition.stop();
-    window.speechSynthesis.cancel();
-    clearTimeout(silenceTimer);
+    interruptBot();
+    isConversationActive = true;
+    safeStartRecognition();
   }
 };
 
 // ------------------------------------
-// Safe recognition starter
+// Stop everything
 // ------------------------------------
-function safeStartRecognition() {
-  if (!isConversationActive || isBotSpeaking) return;
-
-  setTimeout(() => {
-    if (recognitionReady) {
-      try {
-        recognition.start();
-         micBtn.classList.add("pulsing"); // Start pulsing
-      } catch {
-        setTimeout(safeStartRecognition, 500);
-      }
-    }
-  }, 300);
+function stopAll() {
+  interruptBot();
+  clearTimeout(silenceTimer);
+  try {
+    recognition.stop();
+  } catch {}
 }
 
 // ------------------------------------
-// Silence timer
+// HARD interrupt: stop bot audio & pending fetch
+// ------------------------------------
+function interruptBot() {
+  if (currentAbortController) {
+    currentAbortController.abort();
+    currentAbortController = null;
+  }
+  stopBotSpeech();
+}
+
+// ------------------------------------
+// Silence timeout
 // ------------------------------------
 function startSilenceTimer() {
   clearTimeout(silenceTimer);
   silenceTimer = setTimeout(() => {
     if (isConversationActive && !isBotSpeaking) {
-      recognition.stop();
+      try {
+        recognition.stop();
+      } catch {}
     }
   }, USER_SILENCE_TIMEOUT);
 }
 
 // ------------------------------------
-// Send message to AI
+// Safe STT start
 // ------------------------------------
-async function sendMessage() {
-  const message = userInput.value.trim();
-  if (!message) return;
+function safeStartRecognition() {
+  if (!isConversationActive || isBotSpeaking || !recognitionReady) return;
 
-  addMessage("", message, "user");
-  userInput.value = "";
-
-  try {
-    const res = await fetch("/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message })
-    });
-
-    const data = await res.json();
-
-    setTimeout(() => {
-      addMessage("Lira AI Assistant", data.reply, "bot");
-      speakBot(data.reply);
-    }, BOT_REPLY_DELAY);
-
-  } catch {
-    const errorReply = "Sorry, something went wrong!";
-    addMessage("Lira AI Assistant", errorReply, "bot");
-    speakBot(errorReply);
-  }
+  tryLang("bn-BD", (found) => {
+    if (!found) tryLang("en-US");
+  });
 }
 
 // ------------------------------------
-// Add message to chat
+// Try recognition with language
+// ------------------------------------
+function tryLang(lang, callback) {
+  if (isBotSpeaking) return;
+
+  recognition.lang = lang;
+
+  recognition.onresult = async (e) => {
+    if (isBotSpeaking) {
+      recognition.stop();
+      return;
+    }
+
+    const text = e.results[0][0].transcript.trim();
+    if (!text) {
+      recognition.stop();
+      callback?.(false);
+      return;
+    }
+
+    interruptBot();
+    recognition.stop();
+    lastUserLang = lang;
+    userInput.value = text;
+    await sendMessage(text);
+    callback?.(true);
+  };
+
+  recognition.onerror = () => {
+    recognition.stop();
+    callback?.(false);
+  };
+
+  recognition.start();
+}
+
+// ------------------------------------
+// Add chat messages (HTML-matched)
 // ------------------------------------
 function addMessage(sender, text, type) {
-  const chatBox = document.getElementById("chat-box");
-
   const msg = document.createElement("div");
-  msg.classList.add("message", type);
+  msg.className = `message ${type}`;
 
-  const senderSpan = document.createElement("strong");
-  senderSpan.innerText = sender;
-  senderSpan.style.display = "block";
+    // Choose avatar: 👤 for user, 💄 for bot
+  const avatar = type === "user" ? "👤" : "💄";
 
-  const textSpan = document.createElement("span");
-  textSpan.innerText = text;
+  msg.innerHTML = `
+    <div class="message-avatar">${avatar}</div>
+    <div class="message-content">
+      <div class="message-bubble">
+        ${sender ? `<strong>${sender}</strong>` : ""}
+        <p>${text}</p>
+      </div>
+      <span class="message-time">Now</span>
+    </div>
+  `;
 
-  msg.appendChild(senderSpan);
-  msg.appendChild(textSpan);
   chatBox.appendChild(msg);
-
   chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+// ------------------------------------
+// Stop bot TTS
+// ------------------------------------
+function stopBotSpeech() {
+  isBotSpeaking = false;
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.currentTime = 0;
+    currentAudio = null;
+  }
 }
 
 // ------------------------------------
 // Speak bot reply
 // ------------------------------------
-function speakBot(text) {
-  if (!("speechSynthesis" in window)) return;
-
-  // Retry if voices not yet loaded
-  if (!availableVoices.length) {
-    setTimeout(() => speakBot(text), 200);
-    return;
-  }
+async function speakBot(text) {
+  if (!text || !isConversationActive) return;
 
   isBotSpeaking = true;
-  recognition.stop();
-  clearTimeout(silenceTimer);
+  try {
+    recognition.stop();
+  } catch {}
 
-  // Cancel current queue
-  window.speechSynthesis.cancel();
+  try {
+    const res = await fetch("/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
 
-  const utterance = new SpeechSynthesisUtterance(text);
+    const { audio_url } = await res.json();
+    if (!audio_url) throw new Error("TTS failed");
 
-  // 🌸 Friendly young female voice selection
-  const bestVoice =
-    availableVoices.find(v => v.name.includes("Natural") && v.lang.startsWith("en")) ||
-    availableVoices.find(v => v.name.includes("Google") && v.lang.startsWith("en")) ||
-    availableVoices.find(v => v.name.includes("Female") && v.lang.startsWith("en")) ||
-    availableVoices.find(v => v.lang.startsWith("en")) ||
-    availableVoices[0];
+    currentAudio = new Audio(audio_url + "?t=" + Date.now());
+    currentAudio.play();
 
-  utterance.voice = bestVoice;
-  utterance.lang = bestVoice.lang;
-
-  // Friendly, youthful tone
-  utterance.rate = 1.05;
-  utterance.pitch = 1.25;
-  utterance.volume = 1;
-
-  utterance.onend = () => {
-    isBotSpeaking = false;
-    if (isConversationActive) {
+    currentAudio.onended = () => {
+      isBotSpeaking = false;
+      currentAudio = null;
       setTimeout(safeStartRecognition, LISTEN_RESTART_DELAY);
-    }
-  };
+    };
 
-  utterance.onerror = (e) => {
-    console.error("Speech synthesis error:", e);
+    currentAudio.onerror = () => {
+      isBotSpeaking = false;
+      currentAudio = null;
+    };
+  } catch {
     isBotSpeaking = false;
-  };
-
-  window.speechSynthesis.speak(utterance);
+  }
 }
+
+// ------------------------------------
+// Send message to AI
+// ------------------------------------
+async function sendMessageInternal(msg) {
+  if (!msg) return;
+
+  interruptBot();
+
+  // Add user message first
+  addMessage("", msg, "user");
+  userInput.value = "";
+
+  // Show typing indicator immediately after
+  showTyping();
+
+  currentAbortController = new AbortController();
+
+  try {
+    const res = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: msg }),
+      signal: currentAbortController.signal,
+    });
+
+    const data = await res.json();
+
+    // Hide typing and show bot reply
+    setTimeout(() => {
+      hideTyping();
+      addMessage("Lira AI", data.reply, "bot");
+      speakBot(data.reply);
+    }, BOT_REPLY_DELAY);
+
+  } catch (e) {
+    hideTyping();
+    if (e.name !== "AbortError") {
+      addMessage("Lira AI", "Something went wrong.", "bot");
+    }
+  } finally {
+    currentAbortController = null;
+  }
+}
+
+
+
+ const themeToggle = document.getElementById('themeToggle');
+    if (themeToggle) {
+      themeToggle.addEventListener('click', () => {
+        document.body.classList.toggle('dark-mode');
+      });
+    }
+
+// ------------------------------------
+// Expose sendMessage for HTML buttons
+// ------------------------------------
+window.sendMessage = (msgFromUI) => {
+  console.log("message sent");
+  const msg = msgFromUI ?? userInput.value.trim();
+  if (msg) sendMessageInternal(msg);
+};
+
