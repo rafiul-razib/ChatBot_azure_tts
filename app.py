@@ -105,7 +105,6 @@ def chat():
 
     lang = detect_language(user_message)
 
-    # Init session data
     if "chat_history" not in session:
         session["chat_history"] = []
 
@@ -142,20 +141,20 @@ Rules:
     ]
 
     try:
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=messages,
-            max_output_tokens=200,
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=200
         )
 
-        reply = response.output_text.strip()
+        reply = response.choices[0].message.content.strip()
 
-        # Save trimmed history (important for speed)
+        # Keep last 3 turns
         session["chat_history"] = (
-            session["chat_history"] + 
+            session["chat_history"] +
             [{"role": "user", "content": user_message},
              {"role": "assistant", "content": reply}]
-        )[-6:]  # 🔥 keep last 3 turns only
+        )[-6:]
 
     except Exception as e:
         print("❌ OpenAI error:", e)
@@ -166,6 +165,7 @@ Rules:
         )
 
     return jsonify({"reply": reply, "lang": lang})
+
 
 
 # --------------------------------------------------
