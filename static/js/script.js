@@ -3,7 +3,7 @@
 // ------------------------------------
 const BOT_REPLY_DELAY = 100;
 const LISTEN_RESTART_DELAY = 100;
-const USER_SILENCE_TIMEOUT = 2000;
+const USER_SILENCE_TIMEOUT = 5000;
 
 // ------------------------------------
 // Global state

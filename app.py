@@ -7,6 +7,7 @@ import re
 from openai import OpenAI
 from pathlib import Path
 import uuid
+import azure.cognitiveservices.speech as speechsdk
 
 # --------------------------------------------------
 # Setup
@@ -62,7 +63,6 @@ except Exception as e:
 def detect_language(text):
     return "bn" if re.search(r"[\u0980-\u09FF]", text) else "en"
 
-
 def get_all_products():
     products = []
     for brand in PRODUCT_DATA.get("brands", []):
@@ -71,7 +71,6 @@ def get_all_products():
             p["brand"] = brand.get("brand_name", "Unknown Brand")
             products.append(p)
     return products
-
 
 def format_products_for_prompt(products):
     return "\n".join(
@@ -86,6 +85,100 @@ Suitability: {p.get('suitability')}
 ---"""
         for p in products
     )
+# --------------------------------------------------
+# TTS Utilities (Improved Bangla Voice with Expression)
+# --------------------------------------------------
+import random
+import re
+import os
+import uuid
+from pathlib import Path
+import azure.cognitiveservices.speech as speechsdk
+
+TTS_DIR = Path("static/tts")
+TTS_DIR.mkdir(parents=True, exist_ok=True)
+
+def build_ssml(text, lang):
+    """
+    Build SSML for more natural speech.
+    - Bangla: expressive style, dynamic pitch/rate, sentence-level prosody, emphasis
+    - English: cheerful style
+    """
+    if lang == "bn":
+        # Split text into sentences and add pauses
+        sentences = re.split(r'(?<=[।!?])', text)
+        ssml_text = ""
+        for s in sentences:
+            if s.strip():
+                # Longer pause for strong punctuation
+                if s.strip().endswith(("!", "?")):
+                    ssml_text += f"<prosody pitch='{random.choice(['+2%', '+3%', '+4%'])}' rate='{random.choice(['1.03','1.05','1.07'])}'>{s.strip()}</prosody> <break time='500ms'/> "
+                else:
+                    ssml_text += f"<prosody pitch='{random.choice(['+1%', '+2%', '+3%'])}' rate='{random.choice(['1.02','1.04','1.06'])}'>{s.strip()}</prosody> <break time='250ms'/> "
+
+        return f"""
+<speak version="1.0"
+       xmlns="http://www.w3.org/2001/10/synthesis"
+       xmlns:mstts="http://www.w3.org/2001/mstts"
+       xml:lang="bn-BD">
+  <voice name="bn-BD-NabanitaNeural">
+    <mstts:express-as style="chat">
+      {ssml_text}
+    </mstts:express-as>
+  </voice>
+</speak>
+"""
+    else:
+        voice = "en-US-JennyNeural"
+        return f"""
+<speak version="1.0"
+       xmlns="http://www.w3.org/2001/10/synthesis"
+       xmlns:mstts="http://www.w3.org/2001/mstts"
+       xml:lang="en-US">
+  <voice name="{voice}">
+    <mstts:express-as style="cheerful" styledegree="1.2">
+      <prosody rate="1.05" pitch="+3%">
+        {text}
+      </prosody>
+    </mstts:express-as>
+  </voice>
+</speak>
+"""
+
+def synthesize_speech(text, lang):
+    """
+    Generate TTS audio from text using Azure Speech (improved Bangla)
+    """
+    speech_key = os.getenv("AZURE_SPEECH_KEY")
+    service_region = os.getenv("AZURE_SPEECH_REGION")
+
+    if not speech_key or not service_region:
+        raise RuntimeError("Azure Speech credentials missing")
+
+    speech_config = speechsdk.SpeechConfig(
+        subscription=speech_key,
+        region=service_region
+    )
+
+    speech_config.set_speech_synthesis_output_format(
+        speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3
+    )
+
+    audio_path = TTS_DIR / f"{uuid.uuid4().hex}.mp3"
+    audio_config = speechsdk.audio.AudioOutputConfig(filename=str(audio_path))
+
+    synthesizer = speechsdk.SpeechSynthesizer(
+        speech_config=speech_config,
+        audio_config=audio_config
+    )
+
+    ssml = build_ssml(text, lang)
+    result = synthesizer.speak_ssml_async(ssml).get()
+
+    if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
+        raise RuntimeError("Azure TTS failed")
+
+    return audio_path
 
 # --------------------------------------------------
 # Routes
@@ -93,7 +186,6 @@ Suitability: {p.get('suitability')}
 @app.route("/")
 def home():
     return render_template("index.html")
-
 
 @app.route("/chat", methods=["POST"])
 def chat():
@@ -133,7 +225,9 @@ Products:
 Rules:
 - Answer ONLY from company data
 - Keep replies short (2–3 sentences)
-- No emojis, no bullets
+- No emojis, no bullets and numbering
+- instead of BDT say টাকা
+- Any numbers in the reply should be stated as numbers, not words. Like reply ৮৫০ instead of ৮50
 """
         },
         *session["chat_history"],
@@ -166,39 +260,32 @@ Rules:
 
     return jsonify({"reply": reply, "lang": lang})
 
-
-
-# --------------------------------------------------
-# TTS
-# --------------------------------------------------
-TTS_DIR = Path("static/tts")
-TTS_DIR.mkdir(parents=True, exist_ok=True)
-
 @app.route("/tts", methods=["POST"])
 def tts():
     data = request.get_json(silent=True) or {}
     text = data.get("text", "").strip()
+    lang = data.get("lang")  # optional override from client
 
     if not text:
-        return jsonify({"error": "No text"}), 400
+        return jsonify({"error": "No text provided"}), 400
 
     try:
-        voice = "verse" if detect_language(text) == "bn" else "alloy"
-        audio_path = TTS_DIR / f"{uuid.uuid4().hex}.mp3"
+        # Normalize language codes
+        if not lang:
+            lang = detect_language(text)
+        if lang.lower() in ["bn", "bn-bd", "bn_bd"]:
+            lang = "bn"
 
-        with client.audio.speech.with_streaming_response.create(
-            model="gpt-4o-mini-tts",
-            voice=voice,
-            input=text,
-            speed = 1.3) as response:
-            response.stream_to_file(audio_path)
+        audio_path = synthesize_speech(text, lang)
 
-        return jsonify({"audio_url": f"/static/tts/{audio_path.name}"})
+        return jsonify({
+            "audio_url": f"/static/tts/{audio_path.name}",
+            "lang": lang
+        })
 
     except Exception as e:
-        print("❌ TTS error:", e)
-        return jsonify({"error": "TTS failed"}), 500
-
+        print("❌ Azure TTS error:", e)
+        return jsonify({"error": f"TTS failed: {str(e)}"}), 500
 
 # --------------------------------------------------
 # Run
